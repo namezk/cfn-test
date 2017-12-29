@@ -1,0 +1,20 @@
+SampleBucketPolicy: 
+  Type: "AWS::S3::BucketPolicy"
+  Properties: 
+    Bucket: 
+      Ref: "myExampleBucket"
+    PolicyDocument: 
+      Statement: 
+        - 
+          Action: 
+            - "s3:GetObject"
+          Effect: "Allow"
+          Resource: 
+            Fn::Join: 
+              - ""
+              - 
+                - "arn:aws:s3:::"
+                - 
+                  Ref: "myExampleBucket"
+                - "/*"
+          Principal: "*"
