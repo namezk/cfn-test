@@ -1,0 +1,332 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'This template creates an ALB with its ASG and 2 Linux FE servers, one Linux server for the JBoss AP domain controller, NFS mount, S3 bucket, and role'
+Parameters:
+  BastionSecurityGroup:
+    Description: Name of the existing bastion SG
+    Type: 'AWS::EC2::SecurityGroup'
+  ClusterBucketName:
+    Description: Name of the S3bucket you want to create.
+    Type: String
+  IAMRoleName:
+    Description: >-
+      Name of the IAM role you want to create to be used by the cluster nodes to
+      access the S3 bucket.
+    Type: String
+    Default: ClusterBucketAccessRole
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instances
+    Type: 'AWS::EC2::KeyPair::KeyName'
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: VpcId of your existing Virtual Private Cloud (VPC)
+    ConstraintDescription: must be the VPC Id of an existing Virtual Private Cloud.
+  PrivSubnet1:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: A PRIVATE subnet in your VPC the FE servers and the EFS targets
+    ConstraintDescription: Must be an existing subnet residing in the selected VPC.
+  PrivSubnet2:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: A second PRIVATE subnet in your VPC, residing in a different AZ than Subnet1
+    ConstraintDescription: Must be an existing subnet residing in a different AZ than Subnet1.
+  PubSubnet1:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: A PUBLIC subnet for the load balancer.
+  PubSubnet2:
+    Type: 'AWS::EC2::Subnet::Id'
+    Description: A second PUBLIC subnet for the load balancer, must be in a different AZ.
+
+
+  InstanceType:
+    Description: Application servers EC2 instance type
+    Type: String
+    Default: c4.large
+    AllowedValues:
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - c4.large
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  EFSVolumeName:
+    Description: The name to be used for the EFS volume
+    Type: String
+    Default: 'titaniumfs'
+    MinLength: '1'
+  MountPoint:
+    Description: The Linux mount point for the EFS volume
+    Type: String
+    Default: 'titaniumfs'
+    MinLength: '1'
+Resources:
+  ApplicationLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets:
+      - Ref: PubSubnet1
+      - Ref: PubSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+
+  ALBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: '30'
+
+  ALBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable HTTP access via port 80
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+  WebServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allows ALB web traffic, and SSH from bastion SG
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          SourceSecurityGroupId: !Ref BastionSecurityGroup
+      VpcId: !Ref VpcId
+
+  MountTargetSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: Security group for EFS mount target
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+
+  FileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      PerformanceMode: generalPurpose
+      FileSystemTags:
+        - Key: Name
+          Value:
+            Ref: EFSVolumeName
+
+  MountTarget1:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId:
+        Ref: PrivSubnet1
+      SecurityGroups:
+        - Ref: MountTargetSecurityGroup
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: 8d8f86b4-1aaf-4e2f-b21a-0e1a6f0f312f
+  MountTarget2:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId:
+        Ref: FileSystem
+      SubnetId:
+        Ref: PrivSubnet2
+      SecurityGroups:
+        - Ref: MountTargetSecurityGroup
+
+  WebServerGroup:
+    DependsOn: MountTarget2
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivSubnet1
+        - !Ref PrivSubnet2
+      LaunchConfigurationName: !Ref LaunchConfig
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: 2
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+        Count: '2'
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '2'
+        PauseTime: PT10M
+        WaitOnResourceSignals: 'true'
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: c113ac95-942a-4b97-95fa-80c53509f12e
+  LaunchConfig:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      'AWS::CloudFormation::Init':
+        config:
+          packages:
+            yum:
+              httpd: []
+              nfs-utils: []
+          files:
+            /var/www/html/index.html:
+              content: !Join
+                - ''
+                - - >-
+                    <h1>Congratulations, you have successfully launched the AWS
+                    CloudFormation.</h1>
+              mode: '000644'
+              owner: root
+              group: root
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: '000400'
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub >
+                [cfn-auto-reloader-hook]
+
+                triggers=post.update
+
+                path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName}
+                --resource LaunchConfig  --region ${AWS::Region}
+
+                runas=root
+          commands:
+            01_createdir:
+              command: !Sub "mkdir /${MountPoint}"
+            02_mount:
+              command: !Sub >
+                mount -t nfs4 -o nfsvers=4.1 ${FileSystem}.efs.${AWS::Region}.amazonaws.com:/ /${MountPoint}
+            03_permissions:
+              command: !Sub "chown ec2-user:ec2-user /${MountPoint}"
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+              httpd:
+                enabled: 'true'
+                ensureRunning: 'true'
+      'AWS::CloudFormation::Designer':
+        id: 220fc0c3-38a3-403d-91b3-64aa9b28d290
+    Properties:
+      ImageId: ami-8a7859ef
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !Ref KeyName
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      UserData:
+        'Fn::Base64': !Sub >
+          #!/bin/bash -xe
+
+          yum install -y aws-cfn-bootstrap
+
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource
+          LaunchConfig  --region ${AWS::Region}
+
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource
+          WebServerGroup --region ${AWS::Region}
+  ClusterBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Ref ClusterBucketName
+
+  ClusterBucketIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: !Ref IAMRoleName
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+
+  RolePolicies:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: ClusterBucketAccess
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: '*'
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - !Ref ClusterBucket
+                  - '*'
+      Roles:
+        - !Ref ClusterBucketIAMRole
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: b590904c-31fd-4eb2-b1c1-44977be16383
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ClusterBucketIAMRole
+    Metadata:
+      'AWS::CloudFormation::Designer':
+        id: e29b193c-0771-45da-aecb-ea970c9ff571
+Outputs:
+  WebsiteURL:
+    Value: !Join
+      - ''
+      - - 'http://'
+        - !GetAtt
+          - ApplicationLoadBalancer
+          - DNSName
+        - /
+    Description: ALB URL
