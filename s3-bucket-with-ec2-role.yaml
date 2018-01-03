@@ -34,7 +34,7 @@ Resources:
         Version: 2012-10-17
         Statement:
           - Effect: Allow
-            Action: 'describe'
+            Action: 'blabla'
             Resource:
             - !Join ['', ['arn:aws:s3:::', !Ref 'ClusterBucket', /*]]
       Roles:
