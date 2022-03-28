@@ -1,4 +1,4 @@
-AWSTemplateFormatVersion: 2010-09-09
+ AWSTemplateFormatVersion: 2010-09-09
 Description: 'This template creates an ALB with its ASG and 2 Linux FE servers, one Linux server for the JBoss AP domain controller, NFS mount, S3 bucket, and role'
 Parameters:
   BastionSecurityGroup:
